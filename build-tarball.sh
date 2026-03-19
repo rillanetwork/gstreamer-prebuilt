@@ -31,12 +31,11 @@ OUTPUT="gstreamer-sdk-linux-${ARCH}.tar.gz"
 echo "==> Installing GStreamer development packages..."
 
 export DEBIAN_FRONTEND=noninteractive
-sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends \
+sudo apt-get update -q
+sudo apt-get install -y -q --no-install-recommends \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
-    libglib2.0-dev \
-    >/dev/null 2>&1
+    libglib2.0-dev
 
 STAGING="$(mktemp -d)/gstreamer-sdk"
 mkdir -p "$STAGING/include" "$STAGING/lib"
