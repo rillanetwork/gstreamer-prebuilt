@@ -26,6 +26,8 @@ aarch64 | arm64) ARCH="aarch64" ;;
     ;;
 esac
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+OUTPUT_DIR="${SCRIPT_DIR}"
 OUTPUT="gstreamer-sdk-linux-${ARCH}.tar.gz"
 
 echo "==> Installing GStreamer development packages..."
@@ -76,11 +78,9 @@ done
 
 echo "==> Creating tarball..."
 
-cd "$(dirname "$STAGING")"
-tar czf "${OLDPWD}/${OUTPUT}" -C "$STAGING" include lib
+tar czf "${OUTPUT_DIR}/${OUTPUT}" -C "$STAGING" include lib
 
-cd "$OLDPWD"
 echo ""
-echo "Output: ${OUTPUT}"
+echo "Output: ${OUTPUT_DIR}/${OUTPUT}"
 echo "SHA-256:"
-sha256sum "${OUTPUT}"
+sha256sum "${OUTPUT_DIR}/${OUTPUT}"
