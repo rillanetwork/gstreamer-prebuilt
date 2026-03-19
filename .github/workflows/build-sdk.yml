@@ -1,0 +1,107 @@
+name: Build GStreamer SDK
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "GStreamer version (e.g. 1.26.11)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tarball
+        run: |
+          chmod +x build-tarball.sh
+          ./build-tarball.sh ${{ matrix.arch }}
+
+      - name: Compute SHA-256
+        id: sha
+        run: |
+          SHA=$(sha256sum gstreamer-sdk-linux-${{ matrix.arch }}.tar.gz | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gstreamer-sdk-linux-${{ matrix.arch }}
+          path: gstreamer-sdk-linux-${{ matrix.arch }}.tar.gz
+
+    outputs:
+      sha256: ${{ steps.sha.outputs.sha256 }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute SHA-256 hashes
+        id: hashes
+        run: |
+          X86_SHA=$(sha256sum artifacts/gstreamer-sdk-linux-x86_64/gstreamer-sdk-linux-x86_64.tar.gz | awk '{print $1}')
+          ARM_SHA=$(sha256sum artifacts/gstreamer-sdk-linux-aarch64/gstreamer-sdk-linux-aarch64.tar.gz | awk '{print $1}')
+          echo "x86_64_sha256=$X86_SHA" >> "$GITHUB_OUTPUT"
+          echo "aarch64_sha256=$ARM_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: GStreamer SDK ${{ steps.tag.outputs.tag }}
+          body: |
+            Pre-built GStreamer SDK tarballs for Linux (hermetic Bazel builds).
+
+            ## SHA-256 Checksums
+
+            ```
+            ${{ steps.hashes.outputs.x86_64_sha256 }}  gstreamer-sdk-linux-x86_64.tar.gz
+            ${{ steps.hashes.outputs.aarch64_sha256 }}  gstreamer-sdk-linux-aarch64.tar.gz
+            ```
+
+            ## Usage in MODULE.bazel
+
+            ```python
+            gstreamer_pkg(
+                name = "gstreamer_sdk",
+                version = "...",
+                linux_x86_64_url = "https://github.com/rillanetwork/gstreamer-prebuilt/releases/download/${{ steps.tag.outputs.tag }}/gstreamer-sdk-linux-x86_64.tar.gz",
+                linux_x86_64_sha256 = "${{ steps.hashes.outputs.x86_64_sha256 }}",
+                linux_aarch64_url = "https://github.com/rillanetwork/gstreamer-prebuilt/releases/download/${{ steps.tag.outputs.tag }}/gstreamer-sdk-linux-aarch64.tar.gz",
+                linux_aarch64_sha256 = "${{ steps.hashes.outputs.aarch64_sha256 }}",
+            )
+            ```
+          files: |
+            artifacts/gstreamer-sdk-linux-x86_64/gstreamer-sdk-linux-x86_64.tar.gz
+            artifacts/gstreamer-sdk-linux-aarch64/gstreamer-sdk-linux-aarch64.tar.gz
