@@ -40,10 +40,13 @@ sudo apt-get install -y -q --no-install-recommends \
     libunwind-dev \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
-    libglib2.0-dev
+    libglib2.0-dev \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad
 
 STAGING="$(mktemp -d)/gstreamer-sdk"
-mkdir -p "$STAGING/include" "$STAGING/lib"
+mkdir -p "$STAGING/include" "$STAGING/lib" "$STAGING/lib/gstreamer-1.0"
 
 echo "==> Copying headers..."
 
@@ -66,6 +69,13 @@ for lib in glib-2.0 gobject-2.0 gio-2.0 gstreamer-1.0 gstbase-1.0 gmodule-2.0 gt
         [ -e "$f" ] || continue
         cp -P "$f" "$STAGING/lib/"
     done
+done
+
+# Copy GStreamer plugin .so files (for runtime element loading)
+echo "==> Copying GStreamer plugins..."
+for f in /usr/lib/*/gstreamer-1.0/libgst*.so; do
+    [ -e "$f" ] || continue
+    cp -P "$f" "$STAGING/lib/gstreamer-1.0/"
 done
 
 # Ensure unversioned .so symlinks exist
