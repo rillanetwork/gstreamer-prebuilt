@@ -32,7 +32,10 @@ echo "==> Installing GStreamer development packages..."
 
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -q
+# libunwind-dev is needed by libgstreamer1.0-dev but may be held on GitHub
+# Actions runners; installing it explicitly resolves the dependency.
 sudo apt-get install -y -q --no-install-recommends \
+    libunwind-dev \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libglib2.0-dev
