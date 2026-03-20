@@ -1,32 +1,29 @@
 #!/usr/bin/env bash
 # Build hermetic GStreamer SDK tarballs for Linux.
 #
-# Produces a base SDK tarball (headers + core link-time libraries) and
-# separate plugin bundle tarballs that mirror GStreamer's own packaging:
-#   - plugins-core:  core elements (fakesink, queue, filesrc, …)
-#   - plugins-base:  base plugins (typefind, playback, volume, …)
-#   - plugins-good:  well-supported plugins
-#   - plugins-bad:   less-stable plugins (tsdemux, hlsdemux, …)
+# Builds GStreamer 1.20.7 from source inside a glibc 2.28 environment
+# (Debian buster) to ensure compatibility with LLVM toolchains targeting
+# glibc 2.28.
+#
+# Produces:
+#   gstreamer-sdk-linux-<arch>.tar.gz           - Headers + core link-time libraries
+#   gstreamer-plugins-core-linux-<arch>.tar.gz   - Core elements (fakesink, queue, …)
+#   gstreamer-plugins-base-linux-<arch>.tar.gz   - Base plugins (typefind, playback, …)
+#   gstreamer-plugins-good-linux-<arch>.tar.gz   - Good plugins (matroska, isomp4, …)
+#   gstreamer-plugins-bad-linux-<arch>.tar.gz    - Bad plugins (tsdemux, hlsdemux, …)
 #
 # Each plugin bundle includes the plugin .so files AND all transitive
-# shared library dependencies (resolved via ldd), so downstream consumers
-# only need to add the bundles they use.
+# shared library dependencies (resolved via ldd).
 #
-# Designed to run natively on CI runners (Ubuntu 22.04).
+# Designed to run inside a debian:buster Docker container.
 #
 # Usage:
 #   ./build-tarball.sh [x86_64|aarch64]
-#
-# Outputs:
-#   gstreamer-sdk-linux-<arch>.tar.gz
-#   gstreamer-plugins-core-linux-<arch>.tar.gz
-#   gstreamer-plugins-base-linux-<arch>.tar.gz
-#   gstreamer-plugins-good-linux-<arch>.tar.gz
-#   gstreamer-plugins-bad-linux-<arch>.tar.gz
 
 set -euo pipefail
 
 ARCH="${1:-$(uname -m)}"
+GST_VERSION="1.20.7"
 
 # Normalise architecture name
 case "$ARCH" in
@@ -41,22 +38,93 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}"
 
-echo "==> Installing GStreamer development packages..."
+# ── 0. Configure apt (Debian buster is EOL) ─────────────────────────────────
 
+echo "==> Configuring apt sources for Debian buster (archive)..."
+cat > /etc/apt/sources.list <<'SOURCES'
+deb http://archive.debian.org/debian/ buster main
+deb http://archive.debian.org/debian-security/ buster/updates main
+SOURCES
+
+# Disable validity checks for archived repos
+echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid
+
+# ── 1. Install build dependencies ───────────────────────────────────────────
+
+echo "==> Installing build dependencies..."
 export DEBIAN_FRONTEND=noninteractive
-sudo apt-get update -q
-# libunwind-dev is needed by libgstreamer1.0-dev but may be held on GitHub
-# Actions runners; installing it explicitly resolves the dependency.
-sudo apt-get install -y -q --no-install-recommends \
-    libunwind-dev \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
+apt-get update -q
+apt-get install -y -q --no-install-recommends \
+    build-essential \
+    pkg-config \
+    flex \
+    bison \
+    python3 \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
     libglib2.0-dev \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad
+    ninja-build \
+    wget \
+    ca-certificates
 
-# ── Helper: resolve transitive .so deps via ldd ──────────────────────────────
+# Buster ships Meson 0.49; GStreamer 1.20 needs >= 0.59.
+# Meson < 1.3 is required for Python 3.7 compatibility.
+pip3 install 'meson>=0.59,<1.3'
+
+# ── 2. Download and build GStreamer from source ──────────────────────────────
+
+echo ""
+echo "==> Downloading GStreamer ${GST_VERSION}..."
+wget -q "https://gitlab.freedesktop.org/gstreamer/gstreamer/-/archive/${GST_VERSION}/gstreamer-${GST_VERSION}.tar.gz" \
+    -O /tmp/gstreamer-src.tar.gz
+
+cd /tmp
+tar xf gstreamer-src.tar.gz
+
+echo ""
+echo "==> Building GStreamer ${GST_VERSION} (this may take a few minutes)..."
+cd "/tmp/gstreamer-${GST_VERSION}"
+
+meson setup build \
+    --prefix=/opt/gstreamer \
+    --libdir=lib \
+    --buildtype=release \
+    -Dbase=enabled \
+    -Dgood=enabled \
+    -Dbad=enabled \
+    -Dugly=disabled \
+    -Dlibav=disabled \
+    -Ddevtools=disabled \
+    -Dges=disabled \
+    -Drtsp_server=disabled \
+    -Dvaapi=disabled \
+    -Dsharp=disabled \
+    -Drs=disabled \
+    -Dpython=disabled \
+    -Dgst-examples=disabled \
+    -Dtests=disabled \
+    -Dexamples=disabled \
+    -Dintrospection=disabled \
+    -Ddoc=disabled \
+    -Dgtk_doc=disabled \
+    -Dorc=disabled
+
+ninja -C build -j "$(nproc)"
+
+DESTDIR=/tmp/gst-destdir ninja -C build install
+
+GST_ROOT="/tmp/gst-destdir/opt/gstreamer"
+GST_LIB="$GST_ROOT/lib"
+GST_PLUGIN_DIR="$GST_LIB/gstreamer-1.0"
+BUILD_DIR="/tmp/gstreamer-${GST_VERSION}/build"
+
+echo ""
+echo "==> GStreamer installed to $GST_ROOT"
+echo "    Libraries: $(find "$GST_LIB" -maxdepth 1 -name 'libgst*.so*' | wc -l) files"
+echo "    Plugins:   $(find "$GST_PLUGIN_DIR" -name 'libgst*.so' 2>/dev/null | wc -l) files"
+
+# ── Helper: resolve transitive .so deps via ldd ─────────────────────────────
 
 # Given a list of .so files, collect all transitive shared library dependencies
 # (2 levels deep) and copy them into a target directory along with version
@@ -74,7 +142,7 @@ bundle_with_deps() {
         [ -f "$so" ] || continue
         while IFS= read -r dep; do
             [ -n "$dep" ] && ALL_DEPS["$dep"]=1
-        done < <(ldd "$so" 2>/dev/null | grep "=> /" | awk '{print $3}')
+        done < <(LD_LIBRARY_PATH="$GST_LIB" ldd "$so" 2>/dev/null | grep "=> /" | awk '{print $3}')
     done
 
     # Second level: deps of deps
@@ -82,7 +150,7 @@ bundle_with_deps() {
     for dep in "${!ALL_DEPS[@]}"; do
         while IFS= read -r dep2; do
             [ -n "$dep2" ] && L2_DEPS["$dep2"]=1
-        done < <(ldd "$dep" 2>/dev/null | grep "=> /" | awk '{print $3}')
+        done < <(LD_LIBRARY_PATH="$GST_LIB" ldd "$dep" 2>/dev/null | grep "=> /" | awk '{print $3}')
     done
     for dep in "${!L2_DEPS[@]}"; do
         ALL_DEPS["$dep"]=1
@@ -120,7 +188,30 @@ bundle_with_deps() {
     echo "    bundled $copied dependency files"
 }
 
-# ── 1. Base SDK tarball (headers + core link-time libs, NO plugins) ───────────
+# ── Helper: categorize plugins by build subproject ───────────────────────────
+
+# After building the monorepo, find which plugins belong to each subproject
+# by looking at the build directory structure.
+plugins_for_subproject() {
+    local subproject="$1"
+    local sp_build="$BUILD_DIR/subprojects/$subproject"
+
+    if [ ! -d "$sp_build" ]; then
+        return
+    fi
+
+    # Find plugin .so files built by this subproject
+    while IFS= read -r f; do
+        local bn
+        bn=$(basename "$f")
+        # Only include if it's also in the install directory
+        if [ -f "$GST_PLUGIN_DIR/$bn" ]; then
+            echo "$GST_PLUGIN_DIR/$bn"
+        fi
+    done < <(find "$sp_build" -name 'libgst*.so' 2>/dev/null)
+}
+
+# ── 3. SDK tarball (headers + core link-time libs) ───────────────────────────
 
 echo ""
 echo "==> Building base SDK tarball..."
@@ -128,23 +219,37 @@ echo "==> Building base SDK tarball..."
 SDK_STAGING="$(mktemp -d)/gstreamer-sdk"
 mkdir -p "$SDK_STAGING/include" "$SDK_STAGING/lib"
 
-# Headers: glib / gobject / gio
+# GStreamer headers (from our build)
+cp -R "$GST_ROOT/include/gstreamer-1.0" "$SDK_STAGING/include/"
+
+# GLib headers (from system / Debian buster)
 cp -R /usr/include/glib-2.0 "$SDK_STAGING/include/"
 
-# glib internal config header lives under lib/
-GLIBCONFIG_DIR=$(dirname "$(dpkg -L libglib2.0-dev | grep glibconfig.h | head -1)")
+# glibconfig.h (lives under lib/ in a multiarch subdir)
+GLIBCONFIG_DIR=$(find /usr/lib -name glibconfig.h -printf '%h\n' | head -1)
 mkdir -p "$SDK_STAGING/lib/glib-2.0/include"
 cp "$GLIBCONFIG_DIR/glibconfig.h" "$SDK_STAGING/lib/glib-2.0/include/"
 
-# Headers: gstreamer
-cp -R /usr/include/gstreamer-1.0 "$SDK_STAGING/include/"
+# Core link-time libraries from our GStreamer build
+for lib in gstreamer-1.0 gstbase-1.0; do
+    for f in "$GST_LIB"/lib${lib}.so* "$GST_LIB"/lib${lib}.a; do
+        [ -e "$f" ] || continue
+        cp -P "$f" "$SDK_STAGING/lib/"
+    done
+done
 
-# Core link-time libraries (.so symlinks + .a files)
-for lib in glib-2.0 gobject-2.0 gio-2.0 gstreamer-1.0 gstbase-1.0 gmodule-2.0 gthread-2.0; do
+# GLib libraries from system (compiled against glibc 2.28)
+for lib in glib-2.0 gobject-2.0 gio-2.0 gmodule-2.0 gthread-2.0; do
     for f in /usr/lib/*/lib${lib}.so* /usr/lib/*/lib${lib}.a; do
         [ -e "$f" ] || continue
         cp -P "$f" "$SDK_STAGING/lib/"
     done
+done
+
+# Also copy libffi (dependency of GLib/gobject)
+for f in /usr/lib/*/libffi.so*; do
+    [ -e "$f" ] || continue
+    cp -P "$f" "$SDK_STAGING/lib/"
 done
 
 # Ensure unversioned .so symlinks exist
@@ -160,23 +265,11 @@ SDK_TARBALL="gstreamer-sdk-linux-${ARCH}.tar.gz"
 tar czf "${OUTPUT_DIR}/${SDK_TARBALL}" -C "$SDK_STAGING" include lib
 echo "  Created $SDK_TARBALL"
 
-# ── 2. Plugin bundle tarballs ─────────────────────────────────────────────────
+# ── 4. Plugin bundle tarballs ────────────────────────────────────────────────
 
-# Find the system plugin directory
-PLUGIN_DIR=""
-for d in /usr/lib/*/gstreamer-1.0; do
-    [ -d "$d" ] && PLUGIN_DIR="$d" && break
-done
-if [ -z "$PLUGIN_DIR" ]; then
-    echo "ERROR: Could not find GStreamer plugin directory" >&2
-    exit 1
-fi
-
-# Map plugin bundles to their .so files.
-# We use dpkg -L to discover which plugins belong to each package.
 build_plugin_bundle() {
     local bundle_name="$1"
-    local deb_package="$2"
+    local subproject="$2"
 
     echo ""
     echo "==> Building $bundle_name plugin bundle..."
@@ -185,28 +278,28 @@ build_plugin_bundle() {
     staging="$(mktemp -d)/gstreamer-$bundle_name"
     mkdir -p "$staging/lib/gstreamer-1.0" "$staging/lib"
 
-    # Find all plugin .so files from this package
+    # Find plugins for this subproject from the build directory
     local plugin_files=()
     while IFS= read -r f; do
-        if [[ "$f" == */gstreamer-1.0/libgst*.so ]]; then
-            if [ -f "$f" ]; then
-                cp -P "$f" "$staging/lib/gstreamer-1.0/"
-                plugin_files+=("$f")
-            fi
-        fi
-    done < <(dpkg -L "$deb_package" 2>/dev/null)
+        [ -n "$f" ] || continue
+        cp -P "$f" "$staging/lib/gstreamer-1.0/"
+        plugin_files+=("$f")
+    done < <(plugins_for_subproject "$subproject")
 
-    echo "  Found ${#plugin_files[@]} plugins in $deb_package"
+    echo "  Found ${#plugin_files[@]} plugins from $subproject"
 
     if [ ${#plugin_files[@]} -eq 0 ]; then
-        echo "  WARNING: No plugins found for $deb_package, skipping"
+        echo "  WARNING: No plugins found for $subproject, creating empty bundle"
+        local tarball="gstreamer-${bundle_name}-linux-${ARCH}.tar.gz"
+        tar czf "${OUTPUT_DIR}/${tarball}" -C "$staging" lib
+        echo "  Created $tarball (empty)"
         return
     fi
 
     # Bundle transitive .so dependencies
     bundle_with_deps "$staging/lib" "${plugin_files[@]}"
 
-    # Verify key plugins can resolve their deps
+    # Verify all plugins can resolve their deps
     local failed=0
     for pf in "$staging/lib/gstreamer-1.0/"*.so; do
         [ -f "$pf" ] || continue
@@ -229,33 +322,12 @@ build_plugin_bundle() {
     echo "  Created $tarball"
 }
 
-# Core elements: fakesink, filesrc, queue, identity, etc.
-# These are shipped with the core GStreamer package.
-echo ""
-echo "==> Building plugins-core plugin bundle..."
-CORE_STAGING="$(mktemp -d)/gstreamer-plugins-core"
-mkdir -p "$CORE_STAGING/lib/gstreamer-1.0" "$CORE_STAGING/lib"
+build_plugin_bundle "plugins-core" "gstreamer"
+build_plugin_bundle "plugins-base" "gst-plugins-base"
+build_plugin_bundle "plugins-good" "gst-plugins-good"
+build_plugin_bundle "plugins-bad"  "gst-plugins-bad"
 
-# Core elements plugin is always at a known path
-CORE_PLUGIN="$PLUGIN_DIR/libgstcoreelements.so"
-if [ -f "$CORE_PLUGIN" ]; then
-    cp -P "$CORE_PLUGIN" "$CORE_STAGING/lib/gstreamer-1.0/"
-    echo "  Found 1 plugin (libgstcoreelements.so)"
-    bundle_with_deps "$CORE_STAGING/lib" "$CORE_PLUGIN"
-else
-    echo "  WARNING: libgstcoreelements.so not found"
-fi
-
-CORE_TARBALL="gstreamer-plugins-core-linux-${ARCH}.tar.gz"
-tar czf "${OUTPUT_DIR}/${CORE_TARBALL}" -C "$CORE_STAGING" lib
-echo "  Created $CORE_TARBALL"
-
-# Base, Good, Bad plugin bundles
-build_plugin_bundle "plugins-base" "gstreamer1.0-plugins-base"
-build_plugin_bundle "plugins-good" "gstreamer1.0-plugins-good"
-build_plugin_bundle "plugins-bad"  "gstreamer1.0-plugins-bad"
-
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""
 echo "=== All tarballs ==="

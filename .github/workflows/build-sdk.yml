@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "GStreamer version (e.g. 1.26.11)"
+        description: "GStreamer version (e.g. 1.20.7)"
         required: true
         type: string
 
@@ -28,10 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build tarballs
+      - name: Build tarballs in Debian buster container (glibc 2.28)
         run: |
-          chmod +x build-tarball.sh
-          ./build-tarball.sh ${{ matrix.arch }}
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            debian:buster \
+            bash ./build-tarball.sh ${{ matrix.arch }}
 
       - name: Upload SDK artifact
         uses: actions/upload-artifact@v4
@@ -92,6 +95,9 @@ jobs:
           name: GStreamer SDK ${{ steps.tag.outputs.tag }}
           body: |
             Pre-built GStreamer SDK and plugin bundles for Linux (hermetic Bazel builds).
+
+            Built from source on Debian buster (glibc 2.28) for compatibility with
+            LLVM toolchains targeting glibc 2.28.
 
             ## Tarballs
 
