@@ -63,11 +63,27 @@ cp -R /usr/include/gstreamer-1.0 "$STAGING/include/"
 
 echo "==> Copying libraries..."
 
-# Copy .so symlinks and .a files for the libraries we need.
+# Copy .so symlinks and .a files for the core libraries needed at link time.
 for lib in glib-2.0 gobject-2.0 gio-2.0 gstreamer-1.0 gstbase-1.0 gmodule-2.0 gthread-2.0; do
     for f in /usr/lib/*/lib${lib}.so* /usr/lib/*/lib${lib}.a; do
         [ -e "$f" ] || continue
         cp -P "$f" "$STAGING/lib/"
+    done
+done
+
+# Copy ALL GStreamer runtime libraries that plugins depend on at load time
+# (e.g. libgstvideo-1.0.so, libgstaudio-1.0.so, libgstrtp-1.0.so, etc.)
+echo "==> Copying GStreamer runtime libraries..."
+for f in /usr/lib/*/libgst*.so*; do
+    [ -e "$f" ] || continue
+    cp -Pn "$f" "$STAGING/lib/" 2>/dev/null || true
+done
+
+# Copy additional runtime dependencies that plugins commonly need
+for lib in orc-0.4 orc-test-0.4; do
+    for f in /usr/lib/*/lib${lib}.so*; do
+        [ -e "$f" ] || continue
+        cp -Pn "$f" "$STAGING/lib/" 2>/dev/null || true
     done
 done
 
