@@ -65,6 +65,7 @@ apt-get install -y -q --no-install-recommends \
     python3-wheel \
     libglib2.0-dev \
     ninja-build \
+    patchelf \
     wget \
     ca-certificates
 
@@ -261,6 +262,14 @@ for f in *.so.*; do
 done
 popd > /dev/null
 
+# Set RPATH on SDK libraries so they find each other via $ORIGIN.
+echo "  Setting RPATH on SDK libraries..."
+for lf in "$SDK_STAGING/lib/"*.so*; do
+    [ -f "$lf" ] || continue
+    [ -L "$lf" ] && continue
+    patchelf --set-rpath '$ORIGIN' "$lf" 2>/dev/null || true
+done
+
 SDK_TARBALL="gstreamer-sdk-linux-${ARCH}.tar.gz"
 tar czf "${OUTPUT_DIR}/${SDK_TARBALL}" -C "$SDK_STAGING" include lib
 echo "  Created $SDK_TARBALL"
@@ -316,6 +325,21 @@ build_plugin_bundle() {
     else
         echo "  WARNING: $failed plugin(s) have unresolved dependencies"
     fi
+
+    # Set RPATH so plugins find support libs via $ORIGIN/.. (lib/ relative to
+    # lib/gstreamer-1.0/) and support libs find each other via $ORIGIN.
+    # This is required because glibc caches LD_LIBRARY_PATH at process startup
+    # and dlopen() does not re-read it, so env var changes have no effect.
+    echo "  Setting RPATH on bundled libraries..."
+    for pf in "$staging/lib/gstreamer-1.0/"*.so; do
+        [ -f "$pf" ] || continue
+        patchelf --set-rpath '$ORIGIN/..' "$pf" 2>/dev/null || true
+    done
+    for lf in "$staging/lib/"*.so*; do
+        [ -f "$lf" ] || continue
+        [ -L "$lf" ] && continue
+        patchelf --set-rpath '$ORIGIN' "$lf" 2>/dev/null || true
+    done
 
     local tarball="gstreamer-${bundle_name}-linux-${ARCH}.tar.gz"
     tar czf "${OUTPUT_DIR}/${tarball}" -C "$staging" lib
